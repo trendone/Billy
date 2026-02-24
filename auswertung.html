@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Auswertung – Ressourcenplanung</title>
+    <meta name="description" content="Projekt- und Mitarbeiter-Auswertung für die Ressourcenplanung." />
+    <link rel="stylesheet" href="style.css" />
+    <style>
+        .analytics-page {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .analytics-section {
+            margin-bottom: 40px;
+        }
+
+        .analytics-section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .emp-block {
+            margin-bottom: 24px;
+        }
+
+        .emp-block h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .emp-block h3 span {
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .back-link:hover {
+            color: var(--accent-hover);
+        }
+
+        .tab-bar {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 20px;
+        }
+
+        .tab-btn {
+            padding: 8px 20px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: var(--transition);
+        }
+
+        .tab-btn.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+
+        .tab-btn:hover:not(.active) {
+            background: var(--bg-hover);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <header class="app-header">
+        <div class="app-logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" />
+                <line x1="16" y1="2" x2="16" y2="6" />
+                <line x1="8" y1="2" x2="8" y2="6" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            Auswertung
+        </div>
+        <div class="header-nav">
+            <a href="index.html" class="back-link">← Zurück zur Planung</a>
+        </div>
+    </header>
+
+    <div class="analytics-page">
+        <div class="tab-bar">
+            <button class="tab-btn active" onclick="showTab('projects')">📊 Projekte</button>
+            <button class="tab-btn" onclick="showTab('employees')">📊 Mitarbeiter</button>
+        </div>
+
+        <div class="tab-content active" id="tab-projects"></div>
+        <div class="tab-content" id="tab-employees"></div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // ── Shared constants & helpers (duplicated from app.js for standalone use) ──
+
+        const MONTH_NAMES = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+
+        let state = { employees: [], projects: [], tasks: [] };
+
+        function loadState() {
+            const raw = localStorage.getItem('rp_state');
+            if (raw) {
+                try {
+                    const p = JSON.parse(raw);
+                    state.employees = p.employees || [];
+                    state.projects = p.projects || [];
+                    state.tasks = p.tasks || [];
+                } catch (e) { }
+            }
+        }
+
+        function dateToKey(date) {
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        function keyToDate(key) {
+            const [y, m, d] = key.split('-').map(Number);
+            return new Date(y, m - 1, d);
+        }
+
+        function formatShortDate(date) {
+            return `${date.getDate()}. ${MONTH_NAMES[date.getMonth()].slice(0, 3)}`;
+        }
+
+        function countWeekdays(startKey, endKey) {
+            let count = 0;
+            const cur = keyToDate(startKey);
+            const last = keyToDate(endKey);
+            while (cur <= last) {
+                const dow = cur.getDay();
+                if (dow >= 1 && dow <= 5) count++;
+                cur.setDate(cur.getDate() + 1);
+            }
+            return count;
+        }
+
+        function getProject(id) { return state.projects.find(p => p.id === id); }
+        function getEmployee(id) { return state.employees.find(e => e.id === id); }
+
+        function getProjectBookedDays(projectId) {
+            let total = 0;
+            state.tasks.forEach(t => {
+                if (t.projectId !== projectId) return;
+                total += countWeekdays(t.startDate, t.endDate) * t.budget;
+            });
+            return total;
+        }
+
+        function escHtml(str) {
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // ── Tab switching ──
+
+        function showTab(name) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + name).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        // ── Project Analytics ──
+
+        function renderProjectAnalytics() {
+            const container = document.getElementById('tab-projects');
+            const projects = state.projects.filter(p => !p.isVacation);
+
+            if (projects.length === 0) {
+                container.innerHTML = '<p style="color:var(--text-muted)">Keine Projekte vorhanden.</p>';
+                return;
+            }
+
+            let html = '<table class="analytics-table"><thead><tr>';
+            html += '<th>Projekt</th><th>Gebucht</th><th>Budget</th><th>Differenz</th><th>Zeitraum</th><th>Mitarbeiter</th>';
+            html += '</tr></thead><tbody>';
+
+            projects.forEach(p => {
+                const booked = getProjectBookedDays(p.id);
+                const budgetStr = p.budgetDays ? `${p.budgetDays} T` : '–';
+                let diffStr = '–', diffCls = '';
+                if (p.budgetDays) {
+                    const diff = p.budgetDays - booked;
+                    diffCls = diff < 0 ? ' style="color:var(--red)"' : diff === 0 ? ' style="color:var(--yellow)"' : ' style="color:var(--green)"';
+                    diffStr = diff >= 0 ? `+${diff} T` : `${diff} T`;
+                }
+
+                const projTasks = state.tasks.filter(t => t.projectId === p.id);
+                let rangeStr = '–';
+                if (projTasks.length > 0) {
+                    const starts = projTasks.map(t => t.startDate).sort();
+                    const ends = projTasks.map(t => t.endDate).sort();
+                    rangeStr = `${formatShortDate(keyToDate(starts[0]))} – ${formatShortDate(keyToDate(ends[ends.length - 1]))}`;
+                }
+
+                const empIds = [...new Set(projTasks.map(t => t.employeeId))];
+                const empNames = empIds.map(id => { const e = getEmployee(id); return e ? e.name : '?'; }).join(', ');
+
+                html += `<tr>
+        <td><span class="color-dot" style="background:${p.color};display:inline-block;vertical-align:middle;margin-right:6px"></span>${escHtml(p.name)}</td>
+        <td>${booked} T</td>
+        <td>${budgetStr}</td>
+        <td${diffCls}>${diffStr}</td>
+        <td style="font-size:11px">${rangeStr}</td>
+        <td style="font-size:11px">${empNames || '–'}</td>
+      </tr>`;
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        // ── Employee Analytics ──
+
+        function renderEmployeeAnalytics() {
+            const container = document.getElementById('tab-employees');
+
+            if (state.employees.length === 0) {
+                container.innerHTML = '<p style="color:var(--text-muted)">Keine Mitarbeiter vorhanden.</p>';
+                return;
+            }
+
+            const now = new Date();
+            const months = [];
+            for (let offset = -2; offset <= 3; offset++) {
+                const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+                months.push({ year: d.getFullYear(), month: d.getMonth(), label: `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getFullYear().toString().slice(2)}` });
+            }
+
+            let html = '';
+            state.employees.forEach(emp => {
+                html += `<div class="emp-block"><h3>${escHtml(emp.name)} <span>(${emp.weeklyHours}h/Woche)</span></h3>`;
+                html += '<table class="analytics-table"><thead><tr><th>Monat</th><th>Auslastung</th><th>Nicht buchbar</th><th>Projekte</th></tr></thead><tbody>';
+
+                months.forEach(m => {
+                    const firstDay = new Date(m.year, m.month, 1);
+                    const lastDay = new Date(m.year, m.month + 1, 0);
+                    let workDays = 0;
+                    const cur = new Date(firstDay);
+                    while (cur <= lastDay) {
+                        if (cur.getDay() >= 1 && cur.getDay() <= 5) workDays++;
+                        cur.setDate(cur.getDate() + 1);
+                    }
+
+                    const monthStart = dateToKey(firstDay);
+                    const monthEnd = dateToKey(lastDay);
+                    const monthTasks = state.tasks.filter(t =>
+                        t.employeeId === emp.id && t.endDate >= monthStart && t.startDate <= monthEnd
+                    );
+
+                    let bookedDays = 0, vacDays = 0;
+                    const projSet = new Set();
+                    monthTasks.forEach(t => {
+                        const clampStart = t.startDate < monthStart ? monthStart : t.startDate;
+                        const clampEnd = t.endDate > monthEnd ? monthEnd : t.endDate;
+                        const days = countWeekdays(clampStart, clampEnd);
+                        const proj = getProject(t.projectId);
+                        if (proj && proj.isVacation) {
+                            vacDays += days * t.budget;
+                        } else {
+                            bookedDays += days * t.budget;
+                            if (proj) projSet.add(proj.name);
+                        }
+                    });
+
+                    const availableDays = workDays - vacDays;
+                    const pct = availableDays > 0 ? Math.round((bookedDays / availableDays) * 100) : 0;
+                    const hoursPerDay = emp.weeklyHours / 5;
+                    const bookedH = Math.round(bookedDays * hoursPerDay * 10) / 10;
+                    const totalH = Math.round(availableDays * hoursPerDay * 10) / 10;
+                    let pctCls = 'color:var(--green)';
+                    if (pct > 100) pctCls = 'color:var(--red)';
+                    else if (pct > 79) pctCls = 'color:var(--yellow)';
+                    const vacH = Math.round(vacDays * hoursPerDay * 10) / 10;
+                    const projList = [...projSet].join(', ') || '–';
+
+                    html += `<tr>
+          <td>${m.label}</td>
+          <td><span style="${pctCls};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px">(${bookedH}/${totalH}h)</span></td>
+          <td>${vacDays > 0 ? `${vacDays} T (${vacH}h)` : '–'}</td>
+          <td style="font-size:11px">${projList}</td>
+        </tr>`;
+                });
+
+                html += '</tbody></table></div>';
+            });
+
+            container.innerHTML = html;
+        }
+
+        // ── Init ──
+        loadState();
+        renderProjectAnalytics();
+        renderEmployeeAnalytics();
+    </script>
+</body>
+
+</html>
