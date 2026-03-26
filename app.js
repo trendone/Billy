@@ -1,8 +1,28 @@
 /* ===============================================================
-   Ressourcenplanung – App Logic
+   Ressourcenplanung – App Logic (Firebase Edition)
    =============================================================== */
 
-'use strict';
+// ───────────────────────── Firebase ──────────────────────────
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, onSnapshot }
+  from "https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js";
+import { getAuth, signInAnonymously, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCdiplPs_R9OT3DnCqdIK9HqRSvFhr9LFs",
+  authDomain: "billy-ressourcenplanung.firebaseapp.com",
+  projectId: "billy-ressourcenplanung",
+  storageBucket: "billy-ressourcenplanung.firebasestorage.app",
+  messagingSenderId: "1031698150800",
+  appId: "1:1031698150800:web:30cf355129db655c20af15"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+const auth = getAuth(fbApp);
+const stateDocRef = doc(db, 'app', 'state');
 
 // ───────────────────────── Constants ─────────────────────────
 
@@ -30,33 +50,68 @@ let state = {
   projects: [],
   tasks: [],
   currentMonday: getMonday(new Date()),
-  viewWeeks: 1  // 1 or 2
+  viewWeeks: 1
 };
 
 // Selection state for multi-day drag
 let selectionState = { active: false, empId: null, startDate: null, endDate: null, cells: [] };
 
-// ───────────────────────── Persistence ───────────────────────
+// ───────────────────────── Persistence (Firestore) ───────────
+
+let firestoreReady = false;
 
 function saveState() {
-  localStorage.setItem('rp_state', JSON.stringify(state));
+  // Save shared data to Firestore (employees, projects, tasks)
+  setDoc(stateDocRef, {
+    employees: state.employees,
+    projects: state.projects,
+    tasks: state.tasks
+  }).catch(err => console.error('Firestore save error:', err));
+  // Save local-only settings to localStorage
+  localStorage.setItem('rp_local', JSON.stringify({
+    currentMonday: state.currentMonday,
+    viewWeeks: state.viewWeeks
+  }));
 }
 
-function loadState() {
-  const raw = localStorage.getItem('rp_state');
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      state.employees = parsed.employees || [];
-      state.projects = parsed.projects || [];
-      state.tasks = parsed.tasks || [];
-      state.viewWeeks = parsed.viewWeeks || 1;
-      if (parsed.currentMonday) {
-        state.currentMonday = new Date(parsed.currentMonday);
-      }
-    } catch (e) { /* ignore corrupt data */ }
+async function loadState() {
+  // Load shared data from Firestore
+  try {
+    const snap = await getDoc(stateDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      state.employees = data.employees || [];
+      state.projects = data.projects || [];
+      state.tasks = data.tasks || [];
+    }
+  } catch (err) {
+    console.error('Firestore load error:', err);
   }
+  // Load local settings from localStorage
+  try {
+    const local = JSON.parse(localStorage.getItem('rp_local') || '{}');
+    state.viewWeeks = local.viewWeeks || 1;
+    if (local.currentMonday) state.currentMonday = new Date(local.currentMonday);
+  } catch (e) { /* ignore */ }
 }
+
+function startRealtimeSync() {
+  let isFirst = true;
+  onSnapshot(stateDocRef, (snap) => {
+    if (!snap.exists()) return;
+    if (isFirst) { isFirst = false; return; } // skip initial snapshot (already loaded)
+    const data = snap.data();
+    state.employees = data.employees || [];
+    state.projects = data.projects || [];
+    state.tasks = data.tasks || [];
+    ensureSystemProjects(true);
+    render();
+    toast('Daten aktualisiert', 'success');
+  }, (err) => {
+    console.error('Realtime sync error:', err);
+  });
+}
+
 
 // ───────────────────────── Date Helpers ──────────────────────
 
@@ -857,43 +912,105 @@ function escHtml(str) {
 
 // ───────────────────────── Init ──────────────────────────────
 
-function ensureSystemProjects() {
+function ensureSystemProjects(skipSave) {
+  let changed = false;
   // Urlaub
   if (!state.projects.find(p => p.id === VACATION_ID)) {
-    state.projects.unshift({
-      id: VACATION_ID, name: 'Urlaub', color: VACATION_COLOR, isVacation: true
-    });
-    saveState();
+    state.projects.unshift({ id: VACATION_ID, name: 'Urlaub', color: VACATION_COLOR, isVacation: true });
+    changed = true;
   }
   const vp = state.projects.find(p => p.id === VACATION_ID);
-  if (vp && !vp.isVacation) { vp.isVacation = true; saveState(); }
+  if (vp && !vp.isVacation) { vp.isVacation = true; changed = true; }
 
   // Krank
   if (!state.projects.find(p => p.id === SICK_ID)) {
-    // Insert after Urlaub (position 1)
     const idx = state.projects.findIndex(p => p.id === VACATION_ID);
-    state.projects.splice(idx + 1, 0, {
-      id: SICK_ID, name: 'Krank', color: SICK_COLOR, isVacation: true
-    });
-    saveState();
+    state.projects.splice(idx + 1, 0, { id: SICK_ID, name: 'Krank', color: SICK_COLOR, isVacation: true });
+    changed = true;
   }
   const sp = state.projects.find(p => p.id === SICK_ID);
-  if (sp && !sp.isVacation) { sp.isVacation = true; saveState(); }
+  if (sp && !sp.isVacation) { sp.isVacation = true; changed = true; }
 
   // Admin
   if (!state.projects.find(p => p.id === ADMIN_ID)) {
     const idx = state.projects.findIndex(p => p.id === SICK_ID);
-    state.projects.splice(idx + 1, 0, {
-      id: ADMIN_ID, name: 'Admin', color: ADMIN_COLOR, isVacation: true
-    });
-    saveState();
+    state.projects.splice(idx + 1, 0, { id: ADMIN_ID, name: 'Admin', color: ADMIN_COLOR, isVacation: true });
+    changed = true;
   }
   const ap = state.projects.find(p => p.id === ADMIN_ID);
-  if (ap && !ap.isVacation) { ap.isVacation = true; saveState(); }
+  if (ap && !ap.isVacation) { ap.isVacation = true; changed = true; }
+
+  if (changed && !skipSave) saveState();
 }
 
-loadState();
-ensureSystemProjects();
-populateMonthPicker();
-document.getElementById('btnToggleWeeks').textContent = state.viewWeeks === 1 ? '1W' : '2W';
-render();
+// ── Expose functions for inline HTML handlers ──
+window.openModal = openModal;
+window.closeModal = closeModal;
+window.openAddTask = openAddTask;
+window.openEditTask = openEditTask;
+window.cellMouseDown = cellMouseDown;
+window.cellMouseOver = cellMouseOver;
+window.cellMouseUp = cellMouseUp;
+window.editEmployee = editEmployee;
+window.deleteEmployee = deleteEmployee;
+window.editProjectBudget = editProjectBudget;
+window.deleteProject = deleteProject;
+window.selectBudget = selectBudget;
+window.selectColor = selectColor;
+
+// ── Authentication ──
+const APP_PASSWORD = 'TheFutureIsNow!';
+let appInitialized = false;
+
+function showApp() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('appContainer').style.display = '';
+}
+
+// Login button handler
+document.getElementById('btnLogin').addEventListener('click', handleLogin);
+document.getElementById('loginPassword').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') handleLogin();
+});
+
+async function handleLogin() {
+  const pw = document.getElementById('loginPassword').value;
+  if (pw !== APP_PASSWORD) {
+    document.getElementById('loginError').style.display = 'block';
+    return;
+  }
+  document.getElementById('loginError').style.display = 'none';
+  document.getElementById('btnLogin').textContent = 'Wird geladen…';
+  document.getElementById('btnLogin').disabled = true;
+  try {
+    await signInAnonymously(auth);
+  } catch (err) {
+    console.warn('Anonymous auth failed (Safari?), continuing with password-only mode:', err.message);
+  }
+  // Directly proceed after password check (don't wait for onAuthStateChanged)
+  if (!appInitialized) {
+    appInitialized = true;
+    showApp();
+    await init();
+  }
+}
+
+// ── Async init (runs after auth) ──
+async function init() {
+  await loadState();
+  ensureSystemProjects();
+  populateMonthPicker();
+  document.getElementById('btnToggleWeeks').textContent = state.viewWeeks === 1 ? '1W' : '2W';
+  render();
+  startRealtimeSync();
+}
+
+// Auto-login if already authenticated (e.g. page reload in Chrome)
+onAuthStateChanged(auth, (user) => {
+  if (user && !appInitialized) {
+    appInitialized = true;
+    showApp();
+    init();
+  }
+});
+
