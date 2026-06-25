@@ -199,6 +199,22 @@ function getProjectBookedDays(projectId, excludeTaskId) {
 function getProject(id) { return state.projects.find(p => p.id === id); }
 function getEmployee(id) { return state.employees.find(e => e.id === id); }
 
+// Resolve the applicable weekly hours for an employee on a given date.
+// Periods (emp.hoursPeriods = [{from:'YYYY-MM-DD', hours}]) override the base
+// weeklyHours from their `from` date onward, until the next period begins.
+function getWeeklyHoursForDate(emp, date) {
+  let hours = emp.weeklyHours;
+  if (Array.isArray(emp.hoursPeriods) && emp.hoursPeriods.length) {
+    const key = typeof date === 'string' ? date : dateToKey(date);
+    let best = null;
+    emp.hoursPeriods.forEach(p => {
+      if (p.from <= key && (!best || p.from > best.from)) best = p;
+    });
+    if (best) hours = best.hours;
+  }
+  return hours;
+}
+
 function getTasksForEmployeeInWeek(employeeId, weekDays) {
   const start = dateToKey(weekDays[0]);
   const end = dateToKey(weekDays[weekDays.length - 1]);
@@ -240,24 +256,28 @@ function calcUtilization(employeeId, weekDays) {
   const emp = getEmployee(employeeId);
   if (!emp) return { bookedH: 0, totalH: 0, pct: 0, vacationH: 0 };
 
-  const hoursPerDay = emp.weeklyHours / 5;
   const tasks = getTasksForEmployeeInWeek(employeeId, weekDays);
 
-  let bookedDays = 0;
-  let vacationDays = 0;
-  tasks.forEach(task => {
-    const proj = getProject(task.projectId);
-    const days = taskDaysInWeek(task, weekDays);
-    if (proj && proj.isVacation) {
-      vacationDays += days * task.budget;
-    } else {
-      bookedDays += days * task.budget;
-    }
+  // Sum per day so that hours which change mid-period are counted correctly.
+  let bookedH = 0, vacationH = 0, capacityH = 0;
+  weekDays.forEach(day => {
+    const dow = day.getDay();
+    if (dow < 1 || dow > 5) return; // weekdays only
+    const dayKey = dateToKey(day);
+    const hoursPerDay = getWeeklyHoursForDate(emp, day) / 5;
+    capacityH += hoursPerDay;
+    tasks.forEach(task => {
+      if (task.startDate > dayKey || task.endDate < dayKey) return;
+      const proj = getProject(task.projectId);
+      const h = task.budget * hoursPerDay;
+      if (proj && proj.isVacation) vacationH += h;
+      else bookedH += h;
+    });
   });
 
-  const vacationH = Math.round(vacationDays * hoursPerDay * 10) / 10;
-  const bookedH = Math.round(bookedDays * hoursPerDay * 10) / 10;
-  const totalH = Math.round((emp.weeklyHours - vacationH) * 10) / 10;
+  vacationH = Math.round(vacationH * 10) / 10;
+  bookedH = Math.round(bookedH * 10) / 10;
+  const totalH = Math.round((capacityH - vacationH) * 10) / 10;
   const pct = totalH > 0 ? Math.round((bookedH / totalH) * 100) : 0;
   return { bookedH, totalH, pct, vacationH };
 }
@@ -325,9 +345,11 @@ function render() {
     <tbody>`;
 
   state.employees.forEach(emp => {
+    const weekHours = getWeeklyHoursForDate(emp, weekDays[0]);
+    const hasPeriods = Array.isArray(emp.hoursPeriods) && emp.hoursPeriods.length > 0;
     html += `<tr><td class="cell-employee">
         <div class="employee-name">${escHtml(emp.name)}</div>
-        <div class="employee-hours">${emp.weeklyHours}h / Woche</div>
+        <div class="employee-hours">${weekHours}h / Woche${hasPeriods ? ' <span title="Periodische Arbeitszeit hinterlegt" style="color:var(--text-muted)">🕒</span>' : ''}</div>
       </td>`;
 
     // Render each day cell — no colspan, every day gets its own <td>
@@ -641,35 +663,66 @@ function renderEmployeeList() {
     list.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Noch keine Mitarbeiter.</p>';
     return;
   }
-  list.innerHTML = state.employees.map(e => `
+  list.innerHTML = state.employees.map(e => {
+    const periods = Array.isArray(e.hoursPeriods) ? e.hoursPeriods.length : 0;
+    const periodLabel = periods > 0 ? ` · ${periods} Zeitraum${periods > 1 ? 'e' : ''}` : '';
+    return `
     <div class="list-item">
       <div class="list-item-info">
         <div class="list-item-name">${escHtml(e.name)}</div>
-        <div class="list-item-sub">${e.weeklyHours}h / Woche</div>
+        <div class="list-item-sub">${e.weeklyHours}h / Woche${periodLabel}</div>
       </div>
       <div class="list-item-actions">
-        <button class="btn-icon" onclick="editEmployee('${e.id}')" title="Bearbeiten">✏️</button>
+        <button class="btn-icon" onclick="openEmpHours('${e.id}')" title="Arbeitszeit bearbeiten">✏️</button>
         <button class="btn-icon danger" onclick="deleteEmployee('${e.id}')" title="Löschen">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Arbeitszeit-Modal (Name, Standard-Wochenstunden + periodische Zeiträume) ──
+
+let empHoursCtx = { id: null, periods: [] };
+
+function formatPeriodDate(key) {
+  const d = keyToDate(key);
+  return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`;
+}
+
+function openEmpHours(id) {
+  const emp = getEmployee(id);
+  if (!emp) return;
+  empHoursCtx = { id, periods: (emp.hoursPeriods || []).map(p => ({ ...p })) };
+  document.getElementById('empHoursName').value = emp.name;
+  document.getElementById('empHoursBase').value = emp.weeklyHours;
+  document.getElementById('newPeriodDate').value = '';
+  document.getElementById('newPeriodHours').value = '';
+  renderPeriodList();
+  openModal('empHoursModal');
+}
+
+function renderPeriodList() {
+  const list = document.getElementById('empPeriodList');
+  const periods = empHoursCtx.periods.slice().sort((a, b) => a.from < b.from ? -1 : 1);
+  if (periods.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Keine abweichenden Zeiträume.</p>';
+    return;
+  }
+  list.innerHTML = periods.map(p => `
+    <div class="list-item">
+      <div class="list-item-info">
+        <div class="list-item-name">ab ${formatPeriodDate(p.from)}</div>
+        <div class="list-item-sub">${p.hours}h / Woche</div>
+      </div>
+      <div class="list-item-actions">
+        <button class="btn-icon danger" onclick="removePeriod('${p.from}')" title="Löschen">🗑</button>
       </div>
     </div>`).join('');
 }
 
-function editEmployee(id) {
-  const emp = getEmployee(id);
-  if (!emp) return;
-  const newName = prompt('Name:', emp.name);
-  if (newName === null) return;
-  if (!newName.trim()) { toast('Name darf nicht leer sein.', 'error'); return; }
-  const newHours = prompt('Wochenstunden:', emp.weeklyHours);
-  if (newHours === null) return;
-  const h = parseInt(newHours, 10);
-  if (!h || h < 1 || h > 60) { toast('Ungültige Stundenzahl (1–60).', 'error'); return; }
-  emp.name = newName.trim();
-  emp.weeklyHours = h;
-  saveState();
-  renderEmployeeList();
-  render();
-  toast('Mitarbeiter aktualisiert.', 'success');
+function removePeriod(from) {
+  empHoursCtx.periods = empHoursCtx.periods.filter(p => p.from !== from);
+  renderPeriodList();
 }
 
 document.getElementById('btnManageEmployees').addEventListener('click', () => {
@@ -690,6 +743,36 @@ document.getElementById('btnAddEmployee').addEventListener('click', () => {
   renderEmployeeList();
   render();
   toast(`${name} hinzugefügt.`, 'success');
+});
+
+document.getElementById('btnAddPeriod').addEventListener('click', () => {
+  const date = document.getElementById('newPeriodDate').value;
+  const hours = parseInt(document.getElementById('newPeriodHours').value, 10);
+  if (!date) { toast('Bitte ein Startdatum wählen.', 'error'); return; }
+  if (isNaN(hours) || hours < 0 || hours > 60) { toast('Ungültige Stundenzahl (0–60).', 'error'); return; }
+  // Replace any existing entry with the same start date
+  empHoursCtx.periods = empHoursCtx.periods.filter(p => p.from !== date);
+  empHoursCtx.periods.push({ from: date, hours });
+  document.getElementById('newPeriodDate').value = '';
+  document.getElementById('newPeriodHours').value = '';
+  renderPeriodList();
+});
+
+document.getElementById('btnSaveEmpHours').addEventListener('click', () => {
+  const emp = getEmployee(empHoursCtx.id);
+  if (!emp) return;
+  const name = document.getElementById('empHoursName').value.trim();
+  const base = parseInt(document.getElementById('empHoursBase').value, 10);
+  if (!name) { toast('Name darf nicht leer sein.', 'error'); return; }
+  if (isNaN(base) || base < 1 || base > 60) { toast('Ungültige Stundenzahl (1–60).', 'error'); return; }
+  emp.name = name;
+  emp.weeklyHours = base;
+  emp.hoursPeriods = empHoursCtx.periods.slice().sort((a, b) => a.from < b.from ? -1 : 1);
+  saveState();
+  renderEmployeeList();
+  render();
+  closeModal('empHoursModal');
+  toast('Arbeitszeit aktualisiert.', 'success');
 });
 
 function deleteEmployee(id) {
@@ -951,7 +1034,8 @@ window.openEditTask = openEditTask;
 window.cellMouseDown = cellMouseDown;
 window.cellMouseOver = cellMouseOver;
 window.cellMouseUp = cellMouseUp;
-window.editEmployee = editEmployee;
+window.openEmpHours = openEmpHours;
+window.removePeriod = removePeriod;
 window.deleteEmployee = deleteEmployee;
 window.editProjectBudget = editProjectBudget;
 window.deleteProject = deleteProject;

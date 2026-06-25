@@ -205,6 +205,20 @@
         }
 
         function getProject(id) { return state.projects.find(p => p.id === id); }
+
+        // Applicable weekly hours for an employee on a given date (periodic overrides).
+        function getWeeklyHoursForDate(emp, date) {
+          let hours = emp.weeklyHours;
+          if (Array.isArray(emp.hoursPeriods) && emp.hoursPeriods.length) {
+            const key = typeof date === 'string' ? date : dateToKey(date);
+            let best = null;
+            emp.hoursPeriods.forEach(p => {
+              if (p.from <= key && (!best || p.from > best.from)) best = p;
+            });
+            if (best) hours = best.hours;
+          }
+          return hours;
+        }
         function getEmployee(id) { return state.employees.find(e => e.id === id); }
 
         function getProjectBookedDays(projectId) {
@@ -318,29 +332,40 @@
                     );
 
                     let bookedDays = 0, vacDays = 0;
+                    let bookedH = 0, vacH = 0, capacityH = 0;
                     const projSet = new Set();
-                    monthTasks.forEach(t => {
-                        const clampStart = t.startDate < monthStart ? monthStart : t.startDate;
-                        const clampEnd = t.endDate > monthEnd ? monthEnd : t.endDate;
-                        const days = countWeekdays(clampStart, clampEnd);
-                        const proj = getProject(t.projectId);
-                        if (proj && proj.isVacation) {
-                            vacDays += days * t.budget;
-                        } else {
-                            bookedDays += days * t.budget;
-                            if (proj) projSet.add(proj.name);
+                    // Walk each weekday so hours that change mid-month count correctly.
+                    const cur2 = new Date(firstDay);
+                    while (cur2 <= lastDay) {
+                        const dow = cur2.getDay();
+                        if (dow >= 1 && dow <= 5) {
+                            const dk = dateToKey(cur2);
+                            const hpd = getWeeklyHoursForDate(emp, cur2) / 5;
+                            capacityH += hpd;
+                            monthTasks.forEach(t => {
+                                if (t.startDate > dk || t.endDate < dk) return;
+                                const proj = getProject(t.projectId);
+                                if (proj && proj.isVacation) {
+                                    vacDays += t.budget;
+                                    vacH += t.budget * hpd;
+                                } else {
+                                    bookedDays += t.budget;
+                                    bookedH += t.budget * hpd;
+                                    if (proj) projSet.add(proj.name);
+                                }
+                            });
                         }
-                    });
+                        cur2.setDate(cur2.getDate() + 1);
+                    }
 
                     const availableDays = workDays - vacDays;
                     const pct = availableDays > 0 ? Math.round((bookedDays / availableDays) * 100) : 0;
-                    const hoursPerDay = emp.weeklyHours / 5;
-                    const bookedH = Math.round(bookedDays * hoursPerDay * 10) / 10;
-                    const totalH = Math.round(availableDays * hoursPerDay * 10) / 10;
+                    bookedH = Math.round(bookedH * 10) / 10;
+                    const totalH = Math.round((capacityH - vacH) * 10) / 10;
                     let pctCls = 'color:var(--green)';
                     if (pct > 100) pctCls = 'color:var(--red)';
                     else if (pct > 79) pctCls = 'color:var(--yellow)';
-                    const vacH = Math.round(vacDays * hoursPerDay * 10) / 10;
+                    vacH = Math.round(vacH * 10) / 10;
                     const projList = [...projSet].join(', ') || '–';
 
                     html += `<tr>
