@@ -9,6 +9,7 @@ import { getFirestore, doc, setDoc, getDoc, onSnapshot }
   from "https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js";
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+import { IMPORT_DATA } from "./import-data.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCdiplPs_R9OT3DnCqdIK9HqRSvFhr9LFs",
@@ -1024,6 +1025,56 @@ function ensureSystemProjects(skipSave) {
   if (ap && !ap.isVacation) { ap.isVacation = true; changed = true; }
 
   if (changed && !skipSave) saveState();
+}
+
+// ───────────────────────── Billy-Import (einmalig) ───────────
+// Merge der Billy-Liste 2026 (IMPORT_DATA) in den State. Idempotent: vorhandene
+// IDs werden übersprungen, mehrfaches Ausführen erzeugt keine Duplikate.
+function importBillyData() {
+  const empIds = new Set(state.employees.map(e => e.id));
+  const projIds = new Set(state.projects.map(p => p.id));
+  const taskIds = new Set(state.tasks.map(t => t.id));
+  let ae = 0, ap = 0, at = 0;
+  (IMPORT_DATA.employees || []).forEach(e => {
+    if (!empIds.has(e.id)) { state.employees.push({ ...e }); empIds.add(e.id); ae++; }
+  });
+  (IMPORT_DATA.projects || []).forEach(p => {
+    if (!projIds.has(p.id)) { state.projects.push({ ...p }); projIds.add(p.id); ap++; }
+  });
+  (IMPORT_DATA.tasks || []).forEach(t => {
+    if (!taskIds.has(t.id)) { state.tasks.push({ note: '', ...t }); taskIds.add(t.id); at++; }
+  });
+  ensureSystemProjects(true);
+  saveState();
+  renderProjectList();
+  renderEmployeeList();
+  render();
+  return { ae, ap, at };
+}
+
+const btnImportBilly = document.getElementById('btnImportBilly');
+if (btnImportBilly) {
+  btnImportBilly.addEventListener('click', () => {
+    const d = IMPORT_DATA;
+    const msg = `Billy-Liste 2026 importieren?\n\n` +
+      `• ${d.employees.length} Mitarbeiter\n` +
+      `• ${d.projects.length} Projekte\n` +
+      `• ${d.tasks.length} Buchungen\n\n` +
+      `Bereits vorhandene Einträge werden übersprungen (keine Duplikate).`;
+    if (!confirm(msg)) return;
+    btnImportBilly.disabled = true;
+    btnImportBilly.textContent = 'Importiere…';
+    try {
+      const { ae, ap, at } = importBillyData();
+      toast(`Import fertig: +${ae} Mitarbeiter, +${ap} Projekte, +${at} Buchungen`, 'success');
+    } catch (err) {
+      console.error('Billy import error:', err);
+      toast('Import fehlgeschlagen – siehe Konsole.', 'error');
+    } finally {
+      btnImportBilly.disabled = false;
+      btnImportBilly.textContent = '⬇️ Jetzt importieren';
+    }
+  });
 }
 
 // ── Expose functions for inline HTML handlers ──
