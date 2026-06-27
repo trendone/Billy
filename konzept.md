@@ -67,7 +67,7 @@ Leitprinzipien:
 ## 3. Datenmodell (Postgres)
 
 Relationales Schema – ersetzt das heutige Ein-Dokument-Modell. UUID-Primärschlüssel,
-Fremdschlüssel mit `on delete`-Regeln, alle Tabellen mit RLS (Abschnitt 4.6).
+Fremdschlüssel mit `on delete`-Regeln, alle Tabellen mit RLS (Abschnitt 4.7).
 
 ### 3.1 Stammdaten
 ```sql
@@ -102,6 +102,7 @@ projects (
   is_system   bool default false,      -- System-Kategorie (s. u.)
   source      text default 'manuell',  -- manuell|zoho
   external_id text,                    -- Zoho Deal-ID (Idempotenz)
+  offer_number text,                   -- Angebotsnummer aus Zoho (Join-Key zu Mite, s. 4.5)
   probability int                      -- nur Pipeline-Deals: Abschluss-%
 )
 ```
@@ -165,6 +166,41 @@ actuals (
 ```
 → Buchung = Soll, `actuals` = Ist. Größter Glaubwürdigkeits-Gewinn fürs Controlling.
 
+### 3.7 Ist-Zeiten aus Mite (Projekt-/Leistungsebene)
+Die tatsächlich benötigte Zeit wird in **Mite** getrackt. Mite kennt unsere
+Buchungen nicht, liefert aber serverseitig aggregierte Summen **pro Projekt**
+(und pro Monat/Leistung). Wir spiegeln diese aggregiert (nicht je `actuals`-Zeile
+wie 3.6) – das ist die pragmatische Variante für die Projektauswertung.
+```sql
+project_actuals (
+  project_id   uuid references projects on delete cascade,
+  source       text default 'mite',
+  period       date,          -- Monatsanfang (für Verlauf)
+  service_code text,          -- Leistungsnummer aus Mite (z. B. 30400), optional
+  service_name text,          -- Leistungsname (z. B. Trendradar), optional
+  minutes      int,
+  revenue_eur  numeric,
+  primary key (project_id, source, period, service_code)
+)
+```
+**Die drei Auswertungsgrößen** stehen damit nebeneinander:
+Projektvolumen (`projects.budget_eur`) · verplante Tage = Soll (Summe
+`bookings.budget`) · **tatsächlich benötigte Zeit = Ist** (`project_actuals`).
+Mapping Mite↔Projekt siehe Konnektor 4.5.
+
+**Umsetzungsnotiz – Delta gegen das Live-Schema (v1.1, `…190001_initial_schema.sql`):**
+Das Fundament steht; die v2.3-Migration ist klein und überschneidungsfrei.
+- `alter table projects add column offer_number text;` (+ Index für den Join).
+  `projects.source`-CHECK bleibt `('manuell','zoho')` – Mite legt **keine**
+  Projekte an, kein Eintrag nötig.
+- Das bestehende `actuals` (3.6, booking-bezogen) bleibt unangetastet; Mite
+  schreibt in die **neue** `project_actuals` (projekt-/aggregat-bezogen). Beide
+  koexistieren bewusst.
+- Neu: `project_actuals` + schlanke Mapping-Tabelle für Ausnahmen
+  (`project_external_map`, 4.5). Beide brauchen **RLS-Policies** analog zu
+  `…190002_rls.sql`: Lesen für @trendone-Auth, Schreiben nur Service-Role
+  (`sync-mite`), passend zu 4.7.
+
 ---
 
 ## 4. Architektur (Supabase)
@@ -173,7 +209,7 @@ actuals (
 - **Postgres** (Supabase managed) – die relationale Datenbasis aus Abschnitt 3.
 - **Supabase Auth** – echte Logins, SSO für @trendone.com (Microsoft/Google).
 - **Realtime** – ersetzt das heutige `onSnapshot`; Tabellen-Änderungen live an Clients.
-- **Row-Level-Security (RLS)** – Zugriffsregeln direkt in der DB (Abschnitt 4.6).
+- **Row-Level-Security (RLS)** – Zugriffsregeln direkt in der DB (Abschnitt 4.7).
 - **Edge Functions** (Deno/TypeScript) – die Integrations-Brücke (Secrets,
   OAuth, Webhooks, ausgehende Mails) **und** der Erst-Import (Abschnitt 5).
 - **`pg_cron`** – geplante Jobs (Sync, Digest).
@@ -229,11 +265,39 @@ actuals (
 - **Pipeline-Forecast (Killer-Feature)**: offene Deals als **vorläufige, weiche**
   Ressourcennachfrage (schraffiert, nach `probability` gewichtet).
 
-### 4.5 Ausgehend: Mail/Teams-Erinnerungen
+### 4.5 Konnektor Mite (Ist-Zeiterfassung, read-only)
+- **Auth**: API-Key im Header `X-MiteApiKey`, Account-Subdomain
+  `https://{account}.mite.de/`. Key im **Vault**, nie im Frontend.
+- **Quelle**: gruppierter Report in **einem** Call, kein Einzel-Pull/Selbst-Summieren:
+  `GET /time_entries.json?group_by=project,month&at=this_year` → je Gruppe
+  `project_id, project_name, minutes, revenue, from, to`. Mit `group_by=…,service`
+  fällt die Leistungsdimension (3.7) mit ab.
+- **Mapping-Schlüssel: die Angebotsnummer.** Mite-Projektnamen folgen dem Schema
+  `A - <Angebotsnummer>_<Kunde/Beschreibung> <Leistungsnummer>_<Leistungsname>`,
+  z. B. `A - 7763_Rewe digital … 30400_Trendradar`. Die **Angebotsnummer** vorne
+  (Regex `^A\s*-\s*(\d{3,})`) wird in **Zoho generiert** und über `sync-zoho` als
+  `projects.offer_number` mitgezogen → der Abgleich ist ein **deterministischer
+  Gleichheits-Join**, kein Namens-Matching. Die fünfstellige **Leistungsnummer**
+  hinten (`30400`, `60100`, …) ist der Leistungskatalog → zweite Auswertungsachse.
+- **Matching-Kette (gestuft, wie Dedup in 5.3):**
+  1. **Angebotsnummer → `offer_number` → Projekt** (deckt alle „A - …"-Einträge, >90 %).
+  2. **Fallback Kunde + Zeitraum** für nummernlose Fälle (interne Events mit
+     Datums-Präfix, Altlasten); pro Kunde selten zwei Projekte im selben Zeitraum
+     → Vorschlag, **Mensch bestätigt**.
+  3. **KI nur als letzter Fallback** für den uneindeutigen Rest – Vorschlag, nie
+     Auto-Übernahme. Bewusst nachrangig: durch Schritt 1 weitgehend überflüssig.
+- **Speicherung**: bestätigte Ausnahmen-Zuordnungen in einer schlanken
+  Mapping-Tabelle (`source='mite'`, `external_id`=Mite-`project_id`), damit jede
+  Zuordnung **einmalig** ist; danach läuft der Sync rein über die ID. Aggregierte
+  Summen → `project_actuals` (3.7), idempotent über den Primärschlüssel.
+- **Modus**: `sync-mite` (cron, Pull). Voraussetzung: `offer_number` am Projekt,
+  d. h. v2.1 Zoho zuerst (sonst Stufe 1 rückwärts über den Kundennamen, unschärfer).
+
+### 4.6 Ausgehend: Mail/Teams-Erinnerungen
 `send-digest` (cron) wertet Meilensteine + Auslastung aus → fällige/überfällige
 Rechnungen, Überbuchungen, Deadlines. Kanal: Transaktionsmail oder Teams-Webhook.
 
-### 4.6 Sicherheit & Datenschutz
+### 4.7 Sicherheit & Datenschutz
 - **Authentifizierung**: Supabase Auth, SSO auf @trendone.com beschränkt.
 - **Row-Level-Security** auf allen Tabellen:
   - Lesen/Schreiben nur für authentifizierte @trendone-Nutzer.
@@ -298,10 +362,12 @@ Postgres geschrieben. Reihenfolge: **Mitarbeiter → Projekte → Buchungen**
 Rechnungs-Ampel, Projekt-Detailansicht (Gantt), Projekt-Templates.
 
 **B. Integrationen** – Personio-Abwesenheiten (read-only), Zoho-Auftragsimport
-(Closed Won → Projekt), Zoho-Pipeline-Forecast (offene Deals als weiche Last).
+(Closed Won → Projekt), Zoho-Pipeline-Forecast (offene Deals als weiche Last),
+Mite-Ist-Zeiten (read-only, Abgleich über Angebotsnummer).
 
 **C. Controlling** – Profitabilität pro Projekt/Kunde (Umsatz − Kosten),
-Ist-Zeiterfassung, CSV-/Excel-Export, Team-Kapazitäts-Heatmap.
+Plan-vs-Ist (verplante Tage vs. Mite-Ist), Ist-Zeit pro Leistungsart,
+CSV-/Excel-Export, Team-Kapazitäts-Heatmap.
 
 **D. Planungsqualität & Komfort** – deutsche Feiertage als nicht buchbar,
 Überbuchungs-Warnung beim Buchen, Skill-/Rollen-Matrix, Read-only-Management-Link,
@@ -316,7 +382,7 @@ Rechnungs-/Meilenstein-Dashboard ist das erste Feature direkt darauf.
 
 ### v1.1 – Fundament: Neuaufbau auf Supabase ⭐
 **Ziel:** solide, sichere, relationale Basis + saubere Erstdaten.
-- Postgres-Schema (Abschnitt 3) + RLS-Policies (4.6)
+- Postgres-Schema (Abschnitt 3) + RLS-Policies (4.7)
 - Supabase Auth mit SSO (@trendone) – ersetzt das Client-Passwort
 - Realtime-Anbindung (ersetzt `onSnapshot`)
 - Frontend auf `@supabase/supabase-js` neu aufbauen (Firebase-SDK raus)
@@ -345,14 +411,24 @@ Rechnungs-/Meilenstein-Dashboard ist das erste Feature direkt darauf.
 - offene Deals als weiche/gewichtete Last, Was-wäre-wenn-Ansicht, Kapazitäts-Check
 - Voraussetzungen: v2.1 · Risiko: mittel
 
+### v2.3 – Mite-Anbindung (Ist-Zeiten)
+**Ziel:** tatsächlich benötigte Zeit pro Projekt neben Volumen und Soll – Datenbasis
+fürs Controlling (v3.1).
+- `sync-mite` (cron) zieht `group_by=project,month[,service]` → `project_actuals` (3.7)
+- Abgleich Mite↔Projekt über **Angebotsnummer** (`projects.offer_number` aus Zoho),
+  Fallback Kunde+Zeitraum, Mapping-Admin-View für Ausnahmen (Konnektor 4.5)
+- Auswertung: Spalte „Ist (Mite)" + „Δ Soll/Ist"; Ist-Zeit pro Leistungsart
+- Voraussetzungen: v2.1 (liefert `offer_number`) · Risiko: gering–mittel
+  (Restmenge nummernloser Einträge, Mapping-Pflege)
+
 ### v3.0 – PM-Kern: Arbeitspakete
 - `workpackages`, Buchungen hängen an Paketen, Soll/Ist pro Paket
 - Projekt-Detail-/Gantt-Ansicht
 - Voraussetzungen: v1.1 · Risiko: mittel-hoch (UI-Umbau)
 
 ### v3.1 – Controlling
-- Profitabilität pro Projekt/Kunde (Zoho-Umsatz − Kosten), Ist-Zeiterfassung
-- Voraussetzungen: v2.1, v3.0 · Risiko: mittel
+- Profitabilität pro Projekt/Kunde (Zoho-Umsatz − Kosten), Plan-vs-Ist (Mite)
+- Voraussetzungen: v2.1, v2.3 (Mite-Ist), v3.0 · Risiko: mittel
 
 ### v4.0 – Personio-Spiegelung (bewusst nach hinten priorisiert)
 - read-only, technisch unabhängig; Urlaub/Krank bis dahin manuell wie heute
@@ -366,10 +442,12 @@ Rechnungs-/Meilenstein-Dashboard ist das erste Feature direkt darauf.
 ### Abhängigkeitsdiagramm
 ```
 v1.1 (Fundament/Supabase) ─┬─▶ v1.2 (Dashboard) ─▶ v2.0 (Erinnerungen)
-                           ├─▶ v2.1 (Zoho) ─▶ v2.2 (Pipeline-Forecast)
+                           ├─▶ v2.1 (Zoho) ─┬─▶ v2.2 (Pipeline-Forecast)
+                           │                └─▶ v2.3 (Mite-Ist) ──┐
                            ├─▶ v3.0 (Arbeitspakete) ─▶ v3.1 (Controlling)
-                           │                              ▲
-                           │        v2.1 (Zoho) ──────────┘
+                           │                              ▲   ▲
+                           │        v2.1 (Zoho) ──────────┘   │
+                           │        v2.3 (Mite-Ist) ──────────┘
                            └─▶ v4.0 (Personio)   ← unabhängig, bewusst nach hinten
 ```
 
@@ -383,6 +461,10 @@ v1.1 (Fundament/Supabase) ─┬─▶ v1.2 (Dashboard) ─▶ v2.0 (Erinnerunge
 - **E-Mail-Adressen** der Mitarbeiter für Stufe 1 (Pflicht fürs spätere Mapping).
 - **Hosting Frontend**: bei GitHub Pages bleiben oder auf Vercel wechseln?
 - **Zoho**: Data-Center (.eu?), Self-Client, welche Stages = „Auftrag", Custom-Felder.
+  **Welches Deal-Feld trägt die Angebotsnummer** (wird in Zoho generiert) → als
+  `offer_number` ziehen, Join-Key zu Mite.
+- **Mite**: API-Key + Account-Subdomain (`{account}.mite.de`); wie groß die Restmenge
+  nummernloser Einträge ist (interne Events, Altprojekte) → Aufwand Fallback-Mapping.
 - **Personio**: API-Credentials, welche Abwesenheitstypen, DSGVO mit HR.
 - **Tagessätze** für Profitabilität: pro MA, pro Rolle oder pauschal?
 
