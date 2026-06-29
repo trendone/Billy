@@ -7,8 +7,8 @@
 > **✅ LIVE seit 2026-06-29.** `sync-zoho` (COQL-Pull) ist deployt und per `pg_cron`
 > alle 30 Min aktiv. Erstlauf: **174 Consulting-Projekte** in `projects` (Summe netto
 > ~3,68 Mio. €), idempotent verifiziert. Implementierung im `superbilly`-Repo
-> (`supabase/functions/sync-zoho/`). Offen/optional: Webhook (Abschnitt 5),
-> Service-Account fürs Token, COQL-Scope am Token (bereits ergänzt).
+> (`supabase/functions/sync-zoho/`). Token hängt am **Service-Account** (nicht an einer
+> Person). Offen/optional: nur noch der Webhook (Abschnitt 5).
 
 ---
 
