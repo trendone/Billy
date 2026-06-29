@@ -100,7 +100,7 @@ _API-Namen am 2026-06-27 live gegen das Zoho-EU-Portal verifiziert._
 | `client` | Deals | `Account_Name` | Lookup (liefert Firmenname) |
 | `end_date` | Deals | `Leitungserbringung` | Leistungsdatum (API-Name **ohne** „s", verbatim – Tippfehler im API-Namen) |
 | _(Filter)_ | Deals | `Leistungsbereich` | Picklist, muss `= "Consulting"` |
-| _(Verknüpfung)_ | Deals | `Angebot` | Lookup → Quote (liefert `id` + Angebotsname) |
+| _(Verknüpfung)_ | Quotes | `Deal_Name` | Lookup Quote → Deal (zuverlässig gepflegt; s. 4.3) |
 | `external_id` | Deals | `id` (Deal-ID) | Idempotenz |
 | `status` | Quotes | `Quote_Stage` | `∈ {"Beauftragt", "Teilweise beauftragt"}` → Auftrag |
 | **`offer_number`** | **Quotes** | **`Angebotsnummer`** | **autonumber, Join-Key zu Mite (Konzept 4.5)** |
@@ -108,11 +108,24 @@ _API-Namen am 2026-06-27 live gegen das Zoho-EU-Portal verifiziert._
 | _(Angebotsname)_ | Quotes | `Subject` | optional, Anzeige |
 | _(Altnummer)_ | Quotes | `Angebot_Nummer_Altsystem` | Text; Fallback fürs Mite-Matching alter Angebote |
 
-### 4.3 Sync-Ablauf (zwei Pässe)
-1. Deals lesen mit Kriterium `Leistungsbereich = "Consulting"` (COQL oder `getRecords` + Filter).
-2. Pro Deal das verknüpfte Angebot über das Lookup `Angebot` auflösen und aus dem Quote
-   `Quote_Number`, `Grand_Total`, `Quote_Stage` ziehen.
-3. Deal + Quote zu einer `projects`-Zeile zusammenführen, idempotent über `external_id` (Deal-ID).
+### 4.3 Sync-Ablauf (angebotsgetrieben)
+**Wichtig (am 2026-06-27 an Live-Daten verifiziert):** Das Lookup `Deals.Angebot` ist in der
+Praxis **fast immer leer** – auch bei gewonnenen Deals. Verlässlich gepflegt ist die
+**Gegenrichtung** `Quotes.Deal_Name`. Der Sync läuft daher **von den Angeboten aus**:
+
+1. **Quotes** lesen mit Kriterium `Quote_Stage ∈ {"Beauftragt", "Teilweise beauftragt"}`
+   (Such-API `/Quotes/search`, paginiert – `more_records`). Liefert `Angebotsnummer`,
+   `Sub_Total`, `Quote_Stage`, `Subject`, `Deal_Name`-Lookup.
+2. Über `Deal_Name` den **Deal** auflösen und `Leistungsbereich`, `Leitungserbringung`,
+   `Account_Name`, Deal-`id` holen. (Effizient als ein vorgezogener Pull aller
+   `Leistungsbereich = "Consulting"`-Deals → Map `deal_id → Deal`, statt N+1-Einzelabrufe.)
+3. **Nur** Angebote behalten, deren Deal `Leistungsbereich = "Consulting"` hat.
+4. Quote + Deal zu einer `projects`-Zeile zusammenführen, idempotent über `external_id`
+   (Deal-`id`). Kennzahl aus Test-Read: ~7 von 12 beauftragten Angeboten sind Consulting.
+
+> Scope-Hinweis: Die **Such-API** (`/Quotes/search`, `/Deals/search`) ist von
+> `ZohoCRM.modules.*.READ` abgedeckt. **COQL** (`/coql`) bräuchte zusätzlich
+> `ZohoCRM.coql.READ` – aktuell nicht im Token, daher Such-API.
 
 ### 4.4 Geklärte Festlegungen
 1. **Auftrags-Logik:** maßgeblich ist `Quotes.Quote_Stage ∈ {"Beauftragt", "Teilweise beauftragt"}`
