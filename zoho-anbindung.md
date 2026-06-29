@@ -92,18 +92,21 @@ Nur **Consulting**-Projekte sind für uns interessant:
 ### 4.2 Feld-Mapping → `projects`
 API-Namen stehen unter **Setup → Entwicklerbereich / Module und Felder → Feld → API-Name**.
 
+_API-Namen am 2026-06-27 live gegen das Zoho-EU-Portal verifiziert._
+
 | `projects`-Spalte | Modul | Zoho-Feld (API-Name) | Anmerkung |
 |---|---|---|---|
 | `name` | Deals | `Deal_Name` | – |
-| `client` | Deals | `Account_Name` | – |
-| `end_date` | Deals | `Leitungserbringung` | Leistungsdatum (API-Name **ohne** „s", verbatim) |
-| _(Filter)_ | Deals | `Leistungsbereich` | muss `= "Consulting"` |
+| `client` | Deals | `Account_Name` | Lookup (liefert Firmenname) |
+| `end_date` | Deals | `Leitungserbringung` | Leistungsdatum (API-Name **ohne** „s", verbatim – Tippfehler im API-Namen) |
+| _(Filter)_ | Deals | `Leistungsbereich` | Picklist, muss `= "Consulting"` |
 | _(Verknüpfung)_ | Deals | `Angebot` | Lookup → Quote (liefert `id` + Angebotsname) |
 | `external_id` | Deals | `id` (Deal-ID) | Idempotenz |
-| `status` | Quotes | `Quote_Stage` | `= "Gewonnen"` → Auftrag (Projekt anlegen) |
-| **`offer_number`** | **Quotes** | **`Quote_Number`** | **Join-Key zu Mite (Konzept 4.5)** |
-| `budget_eur` | Quotes | `Sub_Total` | Betrag **netto** (nicht `Grand_Total`/brutto) |
+| `status` | Quotes | `Quote_Stage` | `∈ {"Beauftragt", "Teilweise beauftragt"}` → Auftrag |
+| **`offer_number`** | **Quotes** | **`Angebotsnummer`** | **autonumber, Join-Key zu Mite (Konzept 4.5)** |
+| `budget_eur` | Quotes | `Sub_Total` | Betrag **netto** (Formel; nicht `Grand_Total`/brutto) |
 | _(Angebotsname)_ | Quotes | `Subject` | optional, Anzeige |
+| _(Altnummer)_ | Quotes | `Angebot_Nummer_Altsystem` | Text; Fallback fürs Mite-Matching alter Angebote |
 
 ### 4.3 Sync-Ablauf (zwei Pässe)
 1. Deals lesen mit Kriterium `Leistungsbereich = "Consulting"` (COQL oder `getRecords` + Filter).
@@ -112,15 +115,20 @@ API-Namen stehen unter **Setup → Entwicklerbereich / Module und Felder → Fel
 3. Deal + Quote zu einer `projects`-Zeile zusammenführen, idempotent über `external_id` (Deal-ID).
 
 ### 4.4 Geklärte Festlegungen
-1. **„Gewonnen"-Logik:** maßgeblich ist `Quotes.Quote_Stage = "Gewonnen"` → Projekt anlegen.
-   Die Deal-Stage ist hierfür nicht ausschlaggebend.
-2. **Betrag:** **netto** → `Quotes.Sub_Total` (nicht `Grand_Total`/brutto).
+1. **Auftrags-Logik:** maßgeblich ist `Quotes.Quote_Stage ∈ {"Beauftragt", "Teilweise beauftragt"}`
+   → Projekt anlegen. (Achtung: den Wert „Gewonnen" gibt es **nicht** als Quote-Stage; das
+   steckt in der Deal-Stufe `Abgeschlossen (gewonnen)`, ist hier aber nicht maßgeblich.)
+2. **Betrag:** **netto** → `Quotes.Sub_Total` (Formelfeld; nicht `Grand_Total`/brutto).
 3. **Kardinalität:** ein Deal hat **genau ein** Angebot → das über `Angebot` verknüpfte Quote
    ist eindeutig maßgeblich, kein Mehrdeutigkeits-Handling nötig.
+4. **Projekt-Datum:** `projects.end_date` aus `Deals.Leitungserbringung` (einzelnes Leistungsdatum).
+   Das Quotes-Modul böte zwar `Leistungsbeginn`/`Leistungsende` (Zeitraum), wird hier aber bewusst
+   nicht genutzt.
+5. **Angebotsnummer:** Join-Key ist `Quotes.Angebotsnummer` (autonumber); für Altangebote
+   zusätzlich `Angebot_Nummer_Altsystem` als Fallback fürs Mite-Matching.
 
-**Noch zu verifizieren:** exakte API-Namen der Custom-Felder `Leitungserbringung`,
-`Leistungsbereich`, `Angebot` final aus Zoho prüfen (Tippfehler in API-Namen sind häufig –
-wir nutzen sie verbatim).
+Feld-API-Namen und Picklist-Werte sind **live gegen das Portal verifiziert** – keine offenen
+Mapping-Fragen mehr.
 
 ---
 
@@ -129,9 +137,8 @@ wir nutzen sie verbatim).
 Damit ein gewonnener Deal **sofort** ein Projekt anlegt (statt erst beim nächsten cron-Lauf).
 
 **Variante A – Workflow + Webhook (Standard):**
-1. **Setup → Automatisierung → Workflow-Regeln → Regel erstellen** – Modul je nach „Gewonnen"-Logik (4.4),
-   voraussichtlich **Quotes** (`Quote_Stage` = „Gewonnen").
-2. Auslöser: **bei Bearbeitung eines Datensatzes**, Bedingung **`Quote_Stage` = „Gewonnen"**
+1. **Setup → Automatisierung → Workflow-Regeln → Regel erstellen** – Modul **Quotes**.
+2. Auslöser: **bei Bearbeitung eines Datensatzes**, Bedingung **`Quote_Stage` ist „Beauftragt" oder „Teilweise beauftragt"**
    (zusätzlich am verknüpften Deal `Leistungsbereich = "Consulting"`, falls im Workflow prüfbar – sonst in der Function).
 3. Aktion: **Webhook** → Ziel-URL = Edge-Function-URL (`https://<projekt>.supabase.co/functions/v1/zoho-webhook`), Methode **POST**, relevante Felder beider Module als Parameter mappen.
 4. **Sicherheit:** einen **gemeinsamen Geheim-Token** als zusätzlichen Parameter/Header mitschicken
@@ -163,15 +170,17 @@ die einfache Webhook-Variante zu eng wird.
 ## 7. Checkliste – was geliefert werden muss
 
 **Bereits geklärt:** Data Center **EU**, Edition **Zoho One**, **Admin-Rolle** vorhanden;
-Modulaufbau (Deals + Quotes), Filter (`Leistungsbereich = Consulting`), „Gewonnen"-Logik
-(`Quote_Stage = Gewonnen`), Betrag **netto** (`Sub_Total`), Deal↔Quote = 1:1, Feld-Mapping
-inkl. Angebotsnummer (`Quotes.Quote_Number`) – siehe Abschnitt 4.
+Modulaufbau (Deals + Quotes), Filter (`Leistungsbereich = Consulting`), Auftrags-Logik
+(`Quote_Stage ∈ {Beauftragt, Teilweise beauftragt}`), Betrag **netto** (`Sub_Total`),
+Deal↔Quote = 1:1, Feld-Mapping inkl. Angebotsnummer (`Quotes.Angebotsnummer`) – **alle
+API-Namen live verifiziert** (Abschnitt 4). **OAuth-Zugang ist eingerichtet** (Self-Client +
+Refresh-Token erzeugt, 2026-06-27).
 
 **Noch offen:**
-1. ☐ **API-Namen** der Custom-Felder `Leitungserbringung`, `Leistungsbereich`, `Angebot` verifizieren.
-2. ☐ Etwaige weitere **Custom-Felder** fürs Projekt (z. B. Projektnummer, Verantwortlicher).
-3. ☐ Entscheidung: **nur Pull (`sync-zoho`)** zum Start oder gleich **mit Webhook**.
-4. ☐ **Service-/Technik-Account** in Zoho, an den das Token gehängt wird (empfohlen)?
+1. ☐ Etwaige weitere **Custom-Felder** fürs Projekt (z. B. Projektnummer, Verantwortlicher).
+2. ☐ Entscheidung: **nur Pull (`sync-zoho`)** zum Start oder gleich **mit Webhook**.
+3. ☐ **Service-/Technik-Account** in Zoho, an den das Token gehängt wird (empfohlen –
+   aktuell hängt das Token am Admin-Account).
+4. ☐ Refresh-Token + Client-Credentials in den **Supabase Vault** übertragen.
 
-Die Voraussetzungen für den OAuth-Setup stehen damit. Client + Refresh-Token lassen sich in
-einer ~30-Min-Session gemeinsam erzeugen (Punkt 3.3/3.4 sind zeitkritisch und am besten live).
+Damit ist die Zoho-Seite startklar für den Bau der `sync-zoho` Edge Function (Roadmap v2.1).
