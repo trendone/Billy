@@ -22,16 +22,15 @@ in Postgres. Secrets liegen ausschließlich im **Supabase Vault**, nie im Fronte
 
 ## 2. Voraussetzungen in Zoho (vorab prüfen)
 
-| # | Voraussetzung | Warum |
+| # | Voraussetzung | Status |
 |---|---|---|
-| 1 | **Zoho-CRM-Edition mit API-Zugriff** (Standard/Professional/Enterprise – nicht Free) | REST-API & Webhooks erst ab kostenpflichtigen Editionen sinnvoll nutzbar |
-| 2 | **Admin-Rechte** (oder ein Admin, der Connected App + Workflow anlegt) | Connected Apps und Workflow-Regeln dürfen nur Admins erstellen |
-| 3 | **Data-Center-Domain** identifizieren (.eu / .com / …) | bestimmt alle API-URLs; bei uns sehr wahrscheinlich **.eu** (Frankfurt) – muss verifiziert werden |
-| 4 | Ein **Service-/Technik-Account** für die Integration (statt persönlichem Login) | Token hängt am User; persönlicher Account = Abriss beim Mitarbeiterwechsel |
+| 1 | **Edition mit API-Zugriff** | ✅ **Zoho One** (voller API-/Webhook-Zugriff) |
+| 2 | **Admin-Rechte** für Connected App + Workflow | ✅ vorhanden (Peter hat Admin-Rolle) |
+| 3 | **Data-Center-Domain** | ✅ **EU** → `accounts.zoho.eu` / `www.zohoapis.eu` |
+| 4 | **Service-/Technik-Account** für die Integration (statt persönlichem Login) | ☐ offen – empfohlen, damit das Token nicht an einer Person hängt |
 
-**Data-Center prüfen:** In Zoho oben rechts auf das Profil → die URL in der Adresszeile
-zeigt die Domain (`crm.zoho.eu` = EU, `crm.zoho.com` = US). Das entscheidet, ob wir
-`accounts.zoho.eu`/`zohoapis.eu` oder `.com` verwenden.
+> Domains stehen fest (EU): Token-Endpoint `https://accounts.zoho.eu/oauth/v2/token`,
+> API-Domain `https://www.zohoapis.eu`, API Console `https://api-console.zoho.eu`.
 
 ---
 
@@ -45,7 +44,8 @@ Für Server-zu-Server ohne Login-Umleitung nutzt Zoho den **Self-Client**.
 3. Zoho erzeugt **Client ID** und **Client Secret**. Beide notieren (kommen in den Vault).
 
 ### 3.2 Scopes festlegen (so eng wie möglich, read-only)
-- `ZohoCRM.modules.deals.READ` – Deals lesen
+- `ZohoCRM.modules.deals.READ` – Verkaufschancen (Deals) lesen
+- `ZohoCRM.modules.quotes.READ` – Angebote (Quotes) lesen – liefert Angebotsnummer & Betrag
 - `ZohoCRM.settings.fields.READ` – Feld-API-Namen auslesen (für Mapping)
 - `ZohoCRM.settings.modules.READ` – Modul-/Stage-Metadaten
 - (optional, falls Kunde aus Account-Modul) `ZohoCRM.modules.accounts.READ`
@@ -73,28 +73,54 @@ Function bei jedem Lauf selbst.
 
 ---
 
-## 4. Felder & Werte in Zoho identifizieren (Mapping)
+## 4. Datenstruktur & Mapping (zwei verknüpfte Module)
 
-Gebraucht werden die **API-Namen** der Felder, nicht die deutschen Anzeigenamen. Diese
-stehen unter **Setup → Entwicklerbereich / Module und Felder → Deals → Feld → API-Name**.
+Bei uns hängt an einer **Verkaufschance (Deals)** ein **Angebot (Quotes)**. Die für die
+Spiegelung relevanten Felder verteilen sich auf **beide** Module – ein Projekt entsteht
+aus der **Kombination** von Deal + verknüpftem Quote.
 
-| Konzept-Spalte | Zoho-Standardfeld (API-Name) | Zu klären |
-|---|---|---|
-| `name` | `Deal_Name` | – |
-| `client` | `Account_Name` | – |
-| `budget_eur` | `Amount` | – |
-| `end_date` | `Closing_Date` | – |
-| `status` | `Stage` | **welche Stage-Werte = „Auftrag/Closed Won"?** |
-| `probability` | `Probability` | – |
-| `external_id` | `id` (Deal-ID) | – |
-| **`offer_number`** | **❓ Custom-Feld** | **welches Deal-Feld trägt die Angebotsnummer?** |
+- **Deals (Verkaufschance):** Projektname, Kunde, Leistungsdatum, **Filter „Consulting"**,
+  Verknüpfung zum Angebot.
+- **Quotes (Angebote):** **Angebotsnummer** (= Join-Key zu Mite) und **Betrag**.
 
-**Die zwei kritischen Klärungspunkte (Abschnitt 8 des Konzepts):**
-1. **Angebotsnummer** – Join-Key zu Mite (Konzept 4.5). In **welchem Deal-Feld** steht die
-   in Zoho generierte Angebotsnummer (Anzeigename + API-Name)? Ohne dieses Feld funktioniert
-   die spätere Mite-Anbindung (v2.3) nur unscharf.
-2. **Stage-Werte** – Welche Werte gelten als „Auftrag" (= Projekt anlegen), welche als „offen"
-   (= Pipeline-Forecast, v2.2)? Exakte Liste der Stage-Namen.
+Verknüpft sind sie über das Lookup-Feld **`Angebot`** am Deal (zeigt auf einen Quote-Datensatz).
+
+### 4.1 Filter – nur relevante Projekte
+Nur **Consulting**-Projekte sind für uns interessant:
+`Deals.Leistungsbereich = "Consulting"`. Der Sync zieht ausschließlich diese Deals.
+
+### 4.2 Feld-Mapping → `projects`
+API-Namen stehen unter **Setup → Entwicklerbereich / Module und Felder → Feld → API-Name**.
+
+| `projects`-Spalte | Modul | Zoho-Feld (API-Name) | Anmerkung |
+|---|---|---|---|
+| `name` | Deals | `Deal_Name` | – |
+| `client` | Deals | `Account_Name` | – |
+| `end_date` | Deals | `Leitungserbringung` | Leistungsdatum (API-Name **ohne** „s", verbatim) |
+| _(Filter)_ | Deals | `Leistungsbereich` | muss `= "Consulting"` |
+| _(Verknüpfung)_ | Deals | `Angebot` | Lookup → Quote (liefert `id` + Angebotsname) |
+| `external_id` | Deals | `id` (Deal-ID) | Idempotenz |
+| `status` | Quotes | `Quote_Stage` | `= "Gewonnen"` → Auftrag (Projekt anlegen) |
+| **`offer_number`** | **Quotes** | **`Quote_Number`** | **Join-Key zu Mite (Konzept 4.5)** |
+| `budget_eur` | Quotes | `Sub_Total` | Betrag **netto** (nicht `Grand_Total`/brutto) |
+| _(Angebotsname)_ | Quotes | `Subject` | optional, Anzeige |
+
+### 4.3 Sync-Ablauf (zwei Pässe)
+1. Deals lesen mit Kriterium `Leistungsbereich = "Consulting"` (COQL oder `getRecords` + Filter).
+2. Pro Deal das verknüpfte Angebot über das Lookup `Angebot` auflösen und aus dem Quote
+   `Quote_Number`, `Grand_Total`, `Quote_Stage` ziehen.
+3. Deal + Quote zu einer `projects`-Zeile zusammenführen, idempotent über `external_id` (Deal-ID).
+
+### 4.4 Geklärte Festlegungen
+1. **„Gewonnen"-Logik:** maßgeblich ist `Quotes.Quote_Stage = "Gewonnen"` → Projekt anlegen.
+   Die Deal-Stage ist hierfür nicht ausschlaggebend.
+2. **Betrag:** **netto** → `Quotes.Sub_Total` (nicht `Grand_Total`/brutto).
+3. **Kardinalität:** ein Deal hat **genau ein** Angebot → das über `Angebot` verknüpfte Quote
+   ist eindeutig maßgeblich, kein Mehrdeutigkeits-Handling nötig.
+
+**Noch zu verifizieren:** exakte API-Namen der Custom-Felder `Leitungserbringung`,
+`Leistungsbereich`, `Angebot` final aus Zoho prüfen (Tippfehler in API-Namen sind häufig –
+wir nutzen sie verbatim).
 
 ---
 
@@ -103,9 +129,11 @@ stehen unter **Setup → Entwicklerbereich / Module und Felder → Deals → Fel
 Damit ein gewonnener Deal **sofort** ein Projekt anlegt (statt erst beim nächsten cron-Lauf).
 
 **Variante A – Workflow + Webhook (Standard):**
-1. **Setup → Automatisierung → Workflow-Regeln → Regel erstellen**, Modul **Deals**.
-2. Auslöser: **bei Bearbeitung eines Datensatzes**, Bedingung **`Stage` = „Closed Won"** (bzw. unser Auftrags-Wert).
-3. Aktion: **Webhook** → Ziel-URL = Edge-Function-URL (`https://<projekt>.supabase.co/functions/v1/zoho-webhook`), Methode **POST**, relevante Deal-Felder als Parameter mappen.
+1. **Setup → Automatisierung → Workflow-Regeln → Regel erstellen** – Modul je nach „Gewonnen"-Logik (4.4),
+   voraussichtlich **Quotes** (`Quote_Stage` = „Gewonnen").
+2. Auslöser: **bei Bearbeitung eines Datensatzes**, Bedingung **`Quote_Stage` = „Gewonnen"**
+   (zusätzlich am verknüpften Deal `Leistungsbereich = "Consulting"`, falls im Workflow prüfbar – sonst in der Function).
+3. Aktion: **Webhook** → Ziel-URL = Edge-Function-URL (`https://<projekt>.supabase.co/functions/v1/zoho-webhook`), Methode **POST**, relevante Felder beider Module als Parameter mappen.
 4. **Sicherheit:** einen **gemeinsamen Geheim-Token** als zusätzlichen Parameter/Header mitschicken
    (Zoho-Webhooks sind nicht signiert) – die Function prüft ihn.
 
@@ -134,14 +162,16 @@ die einfache Webhook-Variante zu eng wird.
 
 ## 7. Checkliste – was geliefert werden muss
 
-1. ☐ **Data Center** bestätigen (.eu vermutlich) – per Blick in die Zoho-URL.
-2. ☐ **Edition** nennen (Standard/Professional/Enterprise) – wegen API-Limits.
-3. ☐ **Admin-Zugang** (oder Termin mit Zoho-Admin), um die Self-Client-App anzulegen.
-4. ☐ **Angebotsnummer-Feld**: Anzeige- **und** API-Name im Deal-Modul.
-5. ☐ **Stage-Liste**: welche Werte = „Auftrag", welche = „offene Pipeline".
-6. ☐ Etwaige weitere **Custom-Felder** fürs Projekt (z. B. Projektnummer, Verantwortlicher).
-7. ☐ Entscheidung: **nur Pull (`sync-zoho`)** zum Start oder gleich **mit Webhook**.
-8. ☐ **Service-/Technik-Account** in Zoho, an den das Token gehängt wird?
+**Bereits geklärt:** Data Center **EU**, Edition **Zoho One**, **Admin-Rolle** vorhanden;
+Modulaufbau (Deals + Quotes), Filter (`Leistungsbereich = Consulting`), „Gewonnen"-Logik
+(`Quote_Stage = Gewonnen`), Betrag **netto** (`Sub_Total`), Deal↔Quote = 1:1, Feld-Mapping
+inkl. Angebotsnummer (`Quotes.Quote_Number`) – siehe Abschnitt 4.
 
-Sobald 1–6 stehen, lässt sich in einer ~30-Min-Session gemeinsam Client + Refresh-Token
-erzeugen (Punkt 3.3/3.4 sind zeitkritisch und am besten live).
+**Noch offen:**
+1. ☐ **API-Namen** der Custom-Felder `Leitungserbringung`, `Leistungsbereich`, `Angebot` verifizieren.
+2. ☐ Etwaige weitere **Custom-Felder** fürs Projekt (z. B. Projektnummer, Verantwortlicher).
+3. ☐ Entscheidung: **nur Pull (`sync-zoho`)** zum Start oder gleich **mit Webhook**.
+4. ☐ **Service-/Technik-Account** in Zoho, an den das Token gehängt wird (empfohlen)?
+
+Die Voraussetzungen für den OAuth-Setup stehen damit. Client + Refresh-Token lassen sich in
+einer ~30-Min-Session gemeinsam erzeugen (Punkt 3.3/3.4 sind zeitkritisch und am besten live).
