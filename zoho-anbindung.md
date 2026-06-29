@@ -176,11 +176,14 @@ Deal↔Quote = 1:1, Feld-Mapping inkl. Angebotsnummer (`Quotes.Angebotsnummer`) 
 API-Namen live verifiziert** (Abschnitt 4). **OAuth-Zugang ist eingerichtet** (Self-Client +
 Refresh-Token erzeugt, 2026-06-27).
 
+**Erledigt:** Refresh-Token + Client-Credentials als **Edge Function Secrets** im
+Remote-Projekt `rzsptpfgzfigxmyyqdas` hinterlegt (`ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`,
+`ZOHO_REFRESH_TOKEN`, `ZOHO_ACCOUNTS_DOMAIN`, `ZOHO_API_DOMAIN`).
+
 **Noch offen:**
 1. ☐ Etwaige weitere **Custom-Felder** fürs Projekt (z. B. Projektnummer, Verantwortlicher).
 2. ☐ Entscheidung: **nur Pull (`sync-zoho`)** zum Start oder gleich **mit Webhook**.
 3. ☐ **Service-/Technik-Account** in Zoho, an den das Token gehängt wird (empfohlen –
    aktuell hängt das Token am Admin-Account).
-4. ☐ Refresh-Token + Client-Credentials in den **Supabase Vault** übertragen.
 
 Damit ist die Zoho-Seite startklar für den Bau der `sync-zoho` Edge Function (Roadmap v2.1).
