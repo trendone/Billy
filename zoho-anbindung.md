@@ -1,8 +1,14 @@
 # Zoho-CRM-Anbindung – Anforderungen & Einrichtung
 
-> Stand: 2026-06-27 · Companion zu [`konzept.md`](konzept.md) (Abschnitt 4.4, Roadmap v2.1)
+> Stand: 2026-06-29 · Companion zu [`konzept.md`](konzept.md) (Abschnitt 4.4, Roadmap v2.1)
 > Zweck: vollständige Anforderungs- und Einrichtungsliste, um Zoho CRM read-only
 > in unsere Postgres-`projects`-Tabelle zu spiegeln.
+
+> **✅ LIVE seit 2026-06-29.** `sync-zoho` (COQL-Pull) ist deployt und per `pg_cron`
+> alle 30 Min aktiv. Erstlauf: **174 Consulting-Projekte** in `projects` (Summe netto
+> ~3,68 Mio. €), idempotent verifiziert. Implementierung im `superbilly`-Repo
+> (`supabase/functions/sync-zoho/`). Offen/optional: Webhook (Abschnitt 5),
+> Service-Account fürs Token, COQL-Scope am Token (bereits ergänzt).
 
 ---
 
