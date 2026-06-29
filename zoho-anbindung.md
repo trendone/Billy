@@ -46,9 +46,14 @@ Für Server-zu-Server ohne Login-Umleitung nutzt Zoho den **Self-Client**.
 ### 3.2 Scopes festlegen (so eng wie möglich, read-only)
 - `ZohoCRM.modules.deals.READ` – Verkaufschancen (Deals) lesen
 - `ZohoCRM.modules.quotes.READ` – Angebote (Quotes) lesen – liefert Angebotsnummer & Betrag
+- `ZohoCRM.coql.READ` – **COQL-Abfragen** (modulübergreifender Join, s. 4.3) – **erforderlich**
 - `ZohoCRM.settings.fields.READ` – Feld-API-Namen auslesen (für Mapping)
 - `ZohoCRM.settings.modules.READ` – Modul-/Stage-Metadaten
-- (optional, falls Kunde aus Account-Modul) `ZohoCRM.modules.accounts.READ`
+
+Vollständiger Scope-String (verwendet):
+```
+ZohoCRM.modules.deals.READ,ZohoCRM.modules.quotes.READ,ZohoCRM.coql.READ,ZohoCRM.settings.fields.READ,ZohoCRM.settings.modules.READ
+```
 
 ### 3.3 Grant-Token erzeugen (Self-Client-Tab)
 1. Im Self-Client → Tab **Generate Code**.
@@ -108,24 +113,32 @@ _API-Namen am 2026-06-27 live gegen das Zoho-EU-Portal verifiziert._
 | _(Angebotsname)_ | Quotes | `Subject` | optional, Anzeige |
 | _(Altnummer)_ | Quotes | `Angebot_Nummer_Altsystem` | Text; Fallback fürs Mite-Matching alter Angebote |
 
-### 4.3 Sync-Ablauf (angebotsgetrieben)
-**Wichtig (am 2026-06-27 an Live-Daten verifiziert):** Das Lookup `Deals.Angebot` ist in der
-Praxis **fast immer leer** – auch bei gewonnenen Deals. Verlässlich gepflegt ist die
-**Gegenrichtung** `Quotes.Deal_Name`. Der Sync läuft daher **von den Angeboten aus**:
+### 4.3 Sync-Ablauf (angebotsgetrieben, eine COQL-Abfrage)
+**Hintergrund (an Live-Daten verifiziert):**
+- Das Lookup `Deals.Angebot` ist in der Praxis **fast immer leer** – auch bei gewonnenen
+  Deals. Verlässlich gepflegt ist die **Gegenrichtung** `Quotes.Deal_Name`. → angebotsgetrieben.
+- Die **Such-API ist bei 2000 Treffern hart gedeckelt**; es gibt **>2000** beauftragte
+  Angebote insgesamt, und die Suche kann nicht modulübergreifend nach `Leistungsbereich`
+  (am Deal) filtern. → **COQL** statt Such-API.
 
-1. **Quotes** lesen mit Kriterium `Quote_Stage ∈ {"Beauftragt", "Teilweise beauftragt"}`
-   (Such-API `/Quotes/search`, paginiert – `more_records`). Liefert `Angebotsnummer`,
-   `Sub_Total`, `Quote_Stage`, `Subject`, `Deal_Name`-Lookup.
-2. Über `Deal_Name` den **Deal** auflösen und `Leistungsbereich`, `Leitungserbringung`,
-   `Account_Name`, Deal-`id` holen. (Effizient als ein vorgezogener Pull aller
-   `Leistungsbereich = "Consulting"`-Deals → Map `deal_id → Deal`, statt N+1-Einzelabrufe.)
-3. **Nur** Angebote behalten, deren Deal `Leistungsbereich = "Consulting"` hat.
-4. Quote + Deal zu einer `projects`-Zeile zusammenführen, idempotent über `external_id`
-   (Deal-`id`). Kennzahl aus Test-Read: ~7 von 12 beauftragten Angeboten sind Consulting.
+COQL filtert serverseitig über die Modulgrenze und liefert alles in **einer** Abfrage:
+```sql
+select Angebotsnummer, Sub_Total, Quote_Stage, Deal_Name,
+       Deal_Name.Account_Name, Deal_Name.Leitungserbringung
+from Quotes
+where Quote_Stage in ('Beauftragt','Teilweise beauftragt')
+  and Deal_Name.Leistungsbereich = 'Consulting'
+```
+→ `external_id ← Deal_Name.id`, `name ← Deal_Name.name`, `client ← Deal_Name.Account_Name`,
+`end_date ← Deal_Name.Leitungserbringung`, `budget_eur ← Sub_Total`,
+`offer_number ← Angebotsnummer`, `status ← 'aktiv'`, `source ← 'zoho'`.
+Upsert idempotent über `external_id` (Deal-`id`).
 
-> Scope-Hinweis: Die **Such-API** (`/Quotes/search`, `/Deals/search`) ist von
-> `ZohoCRM.modules.*.READ` abgedeckt. **COQL** (`/coql`) bräuchte zusätzlich
-> `ZohoCRM.coql.READ` – aktuell nicht im Token, daher Such-API.
+**Live-Ergebnis (2026-06-29):** 175 beauftragte Consulting-Angebote, **alle mit
+Angebotsnummer** (0 ohne), Summe netto ~3,69 Mio. €. Eine Abfrage, weit unter dem Limit.
+
+> Implementierung: `superbilly/supabase/functions/sync-zoho/` (+ Migration
+> `…120000_add_offer_number.sql`, Cron-Anleitung in der dortigen README).
 
 ### 4.4 Geklärte Festlegungen
 1. **Auftrags-Logik:** maßgeblich ist `Quotes.Quote_Stage ∈ {"Beauftragt", "Teilweise beauftragt"}`
